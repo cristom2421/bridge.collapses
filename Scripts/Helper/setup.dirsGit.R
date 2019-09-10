@@ -32,3 +32,4 @@ if (length(dirsCreate)!=0) sapply(dirsCreate, function(d) dir.create(d))
 
 # cleanup
 rm(dirM,folders,dirsCreate,FLAG_LIST,gitRepoName)
+

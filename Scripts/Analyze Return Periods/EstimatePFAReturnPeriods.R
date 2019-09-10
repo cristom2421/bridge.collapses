@@ -2,18 +2,16 @@
 # using log-log interpolation of input results of a Peak Flood Analysis (Flow Frequency Analysis)
 # Based on a input dataframe of flow-exceedence values
 # Written by Madeleine Flint, 2018-07-06
+# Last Updated on 2019-05-28 by Cristopher Montalvo
 
 # Capable of returning a vector of values of different Q if names are used in Q to indicate types
 
 EstimatePFAReturnPeriod <- function(Q = c(FAIL = NA_real_, FAILPM = NA_real_,FAILYRMAX=NA_real_,
-                                       MAX = NA_real_,MAXPREFAIL=NA_real_, Q100 = NA_real_, Q500 = NA_real_),
-                                 df.PFA, # Input df.PFA should have columns "Flow" and "Freq"
-                                 DATA_SOURCE = "USGS",
-                                 DATA_TYPE = "D",
-                                 ANALYSIS_TYPE = NA){   # column name suffix (e.g., "B17C")
+                                       MAX = NA_real_,MAXPREFAIL=NA_real_, Q100 = NA_real_, Q500 = NA_real_),STAID, df.PFA, # Input df.PFA should have columns "Flow" and "Freq"
+                                 colSuff = NA){   # column name suffix (e.g., "B17CD_USGSD")
   
   require(Hmisc)
-  df.out <- data.frame()
+  df.out <- data.frame(row.names = 1)
   
   TYPES = names(Q)
   if(is.null(TYPES)){
@@ -22,8 +20,8 @@ EstimatePFAReturnPeriod <- function(Q = c(FAIL = NA_real_, FAILPM = NA_real_,FAI
     names(Q) <- "GENERIC"
   }
   
-  log_freq <- log(df.PFA$Freq[!is.na(df.PFA$Freq)])  
-  log_flow <- log(df.PFA$Flow[!is.na(df.PFA$Freq)])
+  log_freq <- log(df.PFA[[STAID]]$Freq[!is.na(df.PFA[[STAID]]$Freq)])  
+  log_flow <- log(df.PFA[[STAID]]$Flow[!is.na(df.PFA[[STAID]]$Freq)])
   
   # Take care of all standard exceedence values
   for(type in TYPES[!grepl("[[:digit:]]",TYPES)]){
@@ -41,33 +39,33 @@ EstimatePFAReturnPeriod <- function(Q = c(FAIL = NA_real_, FAILPM = NA_real_,FAI
                          "500" = which(df.out$Freq==0.002),
                          "100" = which(df.out$Freq==0.01)
                          )
-    Qx         <- df.PFA$Flow[TxIndex]
+    Qx         <- df.PFA[[STAID]]$Flow[TxIndex]
     df.out[,paste(type,colSuff,sep="_")] <- Qx
   }
   
   # Confidence intervals
-  if(any(grepl("05",TYPES)) & !any(grepl("05",colnames(df.PFA)))){
+  if(any(grepl("10",TYPES)) & !any(grepl("10",colnames(df.PFA)))){
     error('Cannot compute confidence interval return periods without values in df.PFA')
   }
   else{
-    log_freq05  <- log(df.PFA$Freq05[!is.na(df.PFA$Freq05)])  
-    log_freq95  <- log(df.PFA$Freq95[!is.na(df.PFA$Freq95)])
-    log_flow05  <- log(df.PFA$Flow[!is.na(df.PFA$Freq05)])  
-    log_flow95  <- log(df.PFA$Flow[!is.na(df.PFA$Freq95)])
+    log_freq10  <- log(df.PFA[[STAID]]$Freq10[!is.na(df.PFA[[STAID]]$Freq10)])
+    log_freq90  <- log(df.PFA[[STAID]]$Freq90[!is.na(df.PFA[[STAID]]$Freq90)])
+    log_flow10  <- log(df.PFA[[STAID]]$Flow[!is.na(df.PFA[[STAID]]$Freq10)])
+    log_flow90  <- log(df.PFA[[STAID]]$Flow[!is.na(df.PFA[[STAID]]$Freq90)])
     for(type in TYPES[grepl("[[:digit:]]{1}5",TYPES)]){
       CI         <- gsub("_","",gsub("[[:alpha:]]","",type), fixed = TRUE)
-      col        <- colnames(df.PFA)[grepl(CI,colnames(df.PFA))]
-      log_freq  <- log(df.PFA[,col][!is.na(df.PFA[df.PFA,col])]) 
-      log_flow  <- log(df.PFA$Flow[!is.na(df.PFA[,col])])  
-      log_Val    <- log(Q[type])  
-      
+      col        <- colnames(df.PFA[[STAID]])[grepl(CI,colnames(df.PFA[[STAID]]))]
+      log_freq  <- log(df.PFA[[STAID]][,col][!is.na(df.PFA[df.PFA[[STAID]],col])])
+      log_flow  <- log(df.PFA[[STAID]]$Flow[!is.na(df.PFA[[STAID]][,col])])
+      log_Val    <- log(Q[type])
+
       ExceedProb <- exp(approxExtrap(log_flow,log_freq,log_Val)$y)
       Tval       <- max(1/ExceedProb,1)
-      colName    <- paste0("T_",type,"_",DATA_TYPE,"_",ANALYSIS_TYPE,DATA_TYPE,"_",DATA_SOURCE)
-      df.out[,colName] <- Tval
-      }
+      df.out[,paste("T",type,colSuff,sep="_")] <- Tval
+    }
   }
-  
-  return(df.out)
+  print(df.out)
 }
+
+  
  

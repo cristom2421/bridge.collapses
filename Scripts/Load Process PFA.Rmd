@@ -1,0 +1,490 @@
+---
+title: "Notebook: Hydrologic and Hydraulic Analysis of Bridge Collapses"
+author: "Madeleine Flint"
+output: 
+  html_notebook:
+    toc: TRUE
+    number_sections: true
+---
+
+This is an R Markdown Notebook that performs analyses related to a study of the frequency of hydraulic bridge collapses. After an initial setup, the sections (1) load output real or simulated gage flow data, (2) load the results of hydrologic Peak Flow Analysis (PFA) from external software such as HEC-SSP and PeakFQ, and (3) computes the flow and return period of events of interest (maximum and collapse-related).
+
+This Notebook was created by Madeleine Flint on 2018-06-27, from previous standalone scripts. It was compiled under R version getRversion().
+
+Hidden: check for consistency with cloned git Repo and for presence of necessary folders and files.
+
+
+## Setup and Data Flags
+Hidden: If the dirsGit list of directory references is not already present in the Global Environment, create it.
+```{r directory setup, include=TRUE}
+require(knitr)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+opts_chunk$set(fig.width=12, fig.height=4, fig.path='Plots/',message=FALSE)
+ if(!("dirsGit" %in% ls())){
+   dirM        <- getwd()
+   gitRepoName <- "hydraulic.failures"
+   if(grepl(gitRepoName,gsub(gitRepoName,"",dirM))){
+     error('Git repository folder name is duplicated, please remove.')
+   }
+   dirM    <- substr(dirM,1,regexpr(gitRepoName,dirM)[[1]][1] + nchar(gitRepoName))
+   dirsGit <- list(dir         = dirM,
+                   Scripts     = file.path(dirM,"Scripts"),
+                   Data        = file.path(dirM,"Data"),
+                   ScriptsPlot = file.path(dirM,"Scripts","Plotting"),
+                   Plots       = file.path(dirM,"Plots"))
+                   Analysis    = file.path(dirM, "Analysis")
+   rm(dirM)
+ }
+```
+
+```{r directories, include=FALSE}
+
+# check for folders and create analysis folders if missing
+setwd(dirsGit$dir)
+fold.req <- c("Plots", "Analysis")
+dirsCreate <- fold.req[!(fold.req %in% list.dirs(recursive = FALSE, full.names = FALSE))]
+if(length(dirsCreate)) sapply(dirsCreate, function(d) dir.create(d))
+fold.req <- c("Processed","Temp","Results","PostProcessed")
+dirsCreate <- fold.req[!(fold.req %in% list.dirs(path = "Analysis", recursive = FALSE, full.names = FALSE))]
+if(length(dirsCreate)) sapply(dirsCreate, function(d) dir.create(file.path("Analysis",d))) 
+fold.req <- c("Bulletin 17C")
+dirsCreate <- fold.req[!(fold.req %in% list.dirs(path = "Temp", recursive = FALSE, full.names = FALSE))]
+if(length(dirsCreate)) sapply(dirsCreate, function(d) dir.create(file.path("Analysis","Temp",d))) 
+
+# cleanup
+rm(fold.req,dirsCreate,getRepoName,files.req)
+```
+
+
+User may edit flags to control which data sources are loaded and processed.
+```{r setup flags for the various analysis that are to be run}
+   # Change DATA_FLAGS and SAVE_FLAGS to control what data is processed
+   DATA_FLAGS <- c(USGS = TRUE,
+                   VICG = FALSE,
+                   NLDAS = FALSE)
+   SAVE_FLAGS <- c(USGS = TRUE,
+                   VICG = FALSE,  #CHECK NAMING CONVENTION
+                   NLDAS = FALSE)
+   FLOWDATA_FLAGS <- c(DailyMean = TRUE,
+                       Peak = TRUE)
+   PARTDUR_FLAGS <- c(PartialDuration = TRUE)
+   SKEWTYPE_FLAGS <- c(GENERALIZED = TRUE, #e.g. Regional Skew
+                       STATION = FALSE,
+                       WEIGHTED = FALSE)
+   ANALYSIS_FLAGS <- c(PKFQ72_17C = FALSE,
+                       PKFQSA_17C = TRUE,
+                       HEC_17D = FALSE,
+                       HEC_17B = FALSE,
+                       PKFQ42_17B = FALSE,
+                       PARTDUR_USGS = FALSE)
+
+   TYPES      <- names(DATA_FLAGS[DATA_FLAGS])
+   DATATYPES <- names(FLOWDATA_FLAGS[FLOWDATA_FLAGS])
+   PARTDUR <- names(PARTDUR_FLAGS[PARTDUR_FLAGS])
+   
+```
+
+
+```{r install_load_packages, include=FALSE}
+packages <- c("ggplot2","ggmap","rgdal","stringr","dataRetrieval","dplyr","tidyverse") # myround(cor(x,y), 2), broman
+new.pkg <- packages[!(packages %in% installed.packages())]
+if (length(new.pkg)){
+    repo <- "http://cran.us.r-project.org"
+    install.packages(new.pkg, dependencies = TRUE, repos = repo)
+    sapply(new.pkg, require, character.only = TRUE)
+}
+```
+
+```{r Set up Columns to Analyze}
+# IDstoView contains the bridge ID to be analyzed
+df.study <- df.Fail.NBI.Gage[with(df.Fail.NBI.Gage, df.Fail.NBI.Gage$ID %in% IDsToView),]
+#Below are the columns that are of interest for the analysis
+
+ColumnsofAnalysis <- c("ID",
+                       "STATE_CODE",
+                       "YR_BLT",
+                       "YR_FAIL",
+                       "DATE_FAIL",
+                       "YR_BLT_EST",
+                       "YR_FAIL_EST",
+                       "DATE_FAIL_EST_USGS",
+                       "DATE_FAIL_I_EST_USGS",
+                       "REGIONAL_SKEW",
+                       "STAID",
+                       "DRAIN_SQKM",
+                       "DATE_P_BEGIN_USGS",
+                       "DATE_P_END_USGS",
+                       "DIST_TO_GAGE",
+                       "DATE_P_BEGIN_ALT_USGS",
+                       "DATE_P_END_ALT_USGS",
+                       "T_FAIL_D_HECD_USGS",
+                       "T_MAXPREFAIL_D_HECD_USGS",
+                       "T_MAX_D_HECD_USGS",
+                       "Q_FAIL_D_USGS",
+                       "Q_FAILYRMAX_D_USGS",
+                       "Q_MAX_D_USGS",
+                       "Q_MAXPREFAIL_D_USGS",
+                       "LATDD",
+                       "LONGDD"
+                       )
+df.study <- df.study[,ColumnsofAnalysis,drop=FALSE]
+row.names(df.study) <- df.study$ID
+IndexofRows <- row.names(df.study)
+
+```
+
+```{r load USGS Flow Data, message=TRUE, warning=TRUE} 
+#Produces list of dataframes with correct headers and class to match with other scripts
+if (FLOWDATA_FLAGS["DailyMean"]){
+  source(file.path(dirsGit$Scripts,"Load Input","DownloadUSGSDailyMeanData.R"))
+    ls.Discharge$DailyMean <- lapply(row.names(df.study),function(i) 
+      DownloadUSGSDMData(STAID = df.study[i,"STAID"], 
+                       BeginDate = "1900-01-01", 
+                       Code = "00060",
+                       stat = "00003",
+                       service = "dv"))
+    names(ls.Discharge$DailyMean) <- df.study$STAID
+    ls.Discharge$DailyMean<- lapply(ls.Discharge$DailyMean, function(x) {x[c("Date")] <- lapply(x[c("Date")],as.Date);x})
+    lsname     <- paste0("ls.",DATATYPES[1],".",T)
+      if(SAVE){
+        assign(lsname,ls.Discharge$DailyMean)
+        savefile <- paste0(gsub("-","",Sys.Date()),"_",lsname,".RData")
+        save(ls.Discharge, file=file.path(dirsGit$Data,savefile))
+        rm(savefile)
+      }
+}
+
+#Peak Data      
+if (FLOWDATA_FLAGS["Peak"]){
+  source(file.path(dirsGit$Scripts,"Load Input","DownloadUSGSPeakData.R"))
+    ls.Discharge$Peak <- lapply(row.names(df.study),function(i)
+      DownloadUSGSPeakData(STAID = df.study[i,"STAID"],
+                           DateFail = as.Date.numeric(ifelse(
+                                                                 !is.na(df.study$DATE_FAIL[which(i==IndexofRows)]),
+                                                                          df.study$DATE_FAIL[which(i==IndexofRows)],
+                                                                          df.study$YR_FAIL[which(i==IndexofRows)]), 
+                                                                 origin = "1970-01-01")))
+    names(ls.Discharge$Peak) <- df.study$STAID
+    lsname     <- paste0("ls.",DATATYPES[2],".",T)
+      if(SAVE){
+        assign(lsname,ls.Discharge$Peak)
+        savefile <- paste0(gsub("-","",Sys.Date()),"_",lsname,".RData")
+        save(ls.Discharge, file=file.path(dirsGit$Data,savefile))
+        rm(savefile)
+      }
+}
+
+#Partial Duration Data from USGS DailyMeanFlow 
+if (PARTDUR_FLAGS["PartialDuration"]){
+  source(file.path(dirsGit$Scripts,"Load Input","DownloadUSGSPartialDurationData.R"))
+  ls.Discharge$PartDurData <- lapply(row.names(df.study), function(i)
+    DownloadPartDurData(STAID = df.study[i,"STAID"],
+                        BeginDate = "1900-01-01"))
+  names(ls.Discharge$PartDurData) <- df.study$STAID
+  lsname     <- paste0("ls.",PARTDUR,".",T)
+      assign(lsname,ls.Discharge$Peak)
+      if(SAVE){
+        savefile <- paste0(gsub("-","",Sys.Date()),"_",lsname,".RData")
+        save(ls.PARTIALDURATIONUSGS, file=file.path(dirsGit$Data,savefile))
+        rm(savefile)
+      }
+}
+
+```
+
+```{r Obtains maximum flow from each year}
+ls.AnnualMax <- list()
+if (FLOWDATA_FLAGS["DailyMean"]){
+  ls.AnnualMax$DailyMean <- list()
+  for (i in df.study$STAID){
+    Dates <- ls.Discharge$DailyMean[[i]]$Date
+    Flow  <- ls.Discharge$DailyMean[[i]]$Flow
+    Years <- unique(format.Date(Dates, "%Y"))
+    AnnualMaxes <- lapply(Years, function(y) max(Flow[format.Date(Dates,"%Y") == y]))
+    AnnualMaxes <- as.numeric(AnnualMaxes)
+    ls.AnnualMax$DailyMean[[i]]$Flow  <- AnnualMaxes
+    Years <- paste(Years, "01","01",sep="-")
+    Years <- as.Date(Years)
+    ls.AnnualMax$DailyMean[[i]]$Date <- Years
+    ls.AnnualMax$DailyMean[[i]] <- na.omit(ls.AnnualMax$DailyMean[[i]])
+  }
+    ls.AnnualMax$DailyMean <- lapply(ls.AnnualMax$DailyMean,as.data.frame)
+}
+if (FLOWDATA_FLAGS["Peak"]){
+  library(data.table)
+  ls.AnnualMax$Peak <- list()
+  ls.AnnualMax$Peak <- lapply(ls.Discharge$Peak, function(x) 
+    as.data.table(x)[, .(Flow = max(Flow)), by = Date])
+  ls.AnnualMax$Peak <- lapply(as.character(df.study$STAID), function(i) na.omit(ls.AnnualMax$Peak[[i]]))
+  ls.AnnualMax$Peak <- lapply(ls.AnnualMax$Peak, as.data.frame)
+  names(ls.AnnualMax$Peak) <- df.study$STAID
+}
+```
+
+
+
+```{r Identify Flow Events}
+source(file.path(dirsGit$Scripts,"Analyze Flow", "IndentifyFlowEvents.R"))
+# the row.names of df.study is being used because the name of the rows are replaces by their respective bridge ID
+ls.FlowEvents <- list()
+for (types in DATATYPES){
+  FlowEvents <- lapply(row.names(df.study),function(i) IdentifyFlowEvents(
+    df.flow = ls.Discharge[[types]][df.study[i,"STAID"]],
+    TYPES    = c("FAIL", "MAX","MAXPREFAIL", "FAILPM","FAILYRMAX"),
+    DateFail = as.Date.numeric(ifelse(                                                              !is.na(df.study$DATE_FAIL[which(i==IndexofRows)]),
+                                                                          df.study$DATE_FAIL[which(i==IndexofRows)],
+                                                                          df.study$YR_FAIL[which(i==IndexofRows)]), 
+                               origin = "1970-01-01"),
+    DateBuilt =as.Date.numeric(
+                                                                 ifelse(!is.na(df.study$YR_BLT[which(i==IndexofRows)]),
+                                                                          pmax(
+                                                                          df.study$YR_BLT[which(i==IndexofRows)],
+                                                                                                              df.study$DATE_P_BEGIN_USGS[which(i==IndexofRows)]),
+                                                                          df.study$DATE_P_BEGIN_USGS[which(i==IndexofRows)]), 
+                                                                 origin =       "1970-01-01"),
+    STAID = df.study[i,"STAID"],
+    nDays=1,
+    colSuff = "USGS",
+    ID = i))
+df.FlowEvents <- ldply(FlowEvents, data.frame)
+row.names(df.FlowEvents) <- df.FlowEvents$ID
+ls.FlowEvents[[types]] <- df.FlowEvents
+dfname     <- paste0("df.FlowEvents",".",types,".",T)
+assign(dfname,df.FlowEvents)
+      if(SAVE){
+        dfname     <- paste0("df.FlowEvents.",types,".",T)
+        assign(dfname,df.FlowEvents)
+        savefile <- paste0(gsub("-","",Sys.Date()),"_",dfname,".RData")
+        save(df.FlowEvents.PKFQSA_17C.USGSDAILYMEAN, file=file.path(dirsGit$Data,savefile))
+        rm(savefile)
+
+      }
+}
+
+
+```
+
+
+
+```{r Creates .spc files for different types of skews in order to perform PeakFQSA Bulletin 17C Analysis}
+source(file.path(dirsGit$Scripts, "Process Output", "write.mod.watstore.B17C.R"))
+if (SKEWTYPE_FLAGS["GENERALIZED"]){
+  for (types in DATATYPES){
+    dir.create(file.path(dirsGit$Analysis, "Results","Bulletin 17C"),"Generalized",showWarnings = FALSE)
+    folder.out <- file.path(dirsGit$Analysis, "Results","Bulletin 17C","Generalized")
+    invisible(lapply(row.names(df.study), function(i) 
+      write.mod.watstore(dates = ls.Discharge$Peak[[df.study[i,"STAID"]]]$Date,
+                         Q = ls.Discharge$Peak[[df.study[i,"STAID"]]]$Flow,
+                         STAID = df.study[i,"STAID"],SKEW = df.study[i,"REGIONAL_SKEW"],
+                         SKEWSD = 0.55, 
+                         SKEWTYPE = "GENERALIZED",
+                         DATATYPE = types,
+                         folder.out = folder.out)))
+  }
+}
+
+if (SKEWTYPE_FLAGS["STATION"]){
+  for (types in DATATYPES){
+    dir.create(file.path(dirsGit$Analysis, "Results","Bulletin 17C"),"Station",showWarnings = FALSE)
+    folder.out <- file.path(dirsGit$Analysis, "Results","Bulletin 17C","Station")
+    invisible(lapply(row.names(df.study), function(i) 
+      write.mod.watstore(dates = ls.AnnualMax[[df.study[i,"STAID"]]]$Date,
+                         Q = ls.AnnualMax[[df.study[i,"STAID"]]]$Flow,
+                         STAID = df.study$STAID[i,"STAID"],SKEW = df.study[i,"REGIONAL_SKEW"],
+                         SKEWSD = 0.55, 
+                         SKEWTYPE = "STATION",
+                         DATATYPE = types,
+                         folder.out = folder.out)))
+  }
+}
+
+if (SKEWTYPE_FLAGS["WEIGHTED"]){
+  for (types in DATATYPES){
+    dir.create(file.path(dirsGit$Analysis, "Results","Bulletin 17C"),"Weighted",showWarnings = FALSE)
+    folder.out <- file.path(dirsGit$Analysis, "Results","Bulletin 17C","Weighted")
+    invisible(lapply(1:length(ls.AnnualMax), function(i) 
+      write.mod.watstore(dates = ls.AnnualMax[[df.study[i,"STAID"]]]$Date,
+                         Q = ls.AnnualMax[[df.study[i,"STAID"]]]$Flow,
+                         STAID = df.study[i,"STAID"],
+                         SKEW = df.study[i,"REGIONAL_SKEW"],
+                         SKEWSD = 0.55, 
+                         SKEWTYPE = "WEIGHTED",
+                         DATATYPE = types,
+                         folder.out = folder.out)))
+  }
+}
+```
+
+```{r Run PeakFQSA Bulletin 17C Analysis}
+if (SKEWTYPE_FLAGS["GENERALIZED"]){
+  spcFiles <- list.files(path = file.path(dirsGit$Analysis,"Results","Bulletin 17C","Generalized"), 
+                         pattern = '*.spc')
+  invisible(lapply(1:length(spcFiles), function(i) system("PeakfqSA_win.exe",spcFiles[i],intern = TRUE, 
+                                                          ignore.stdout = FALSE,
+                                                          ignore.stderr = FALSE,wait=FALSE)))
+}
+if (SKEWTYPE_FLAGS["STATION"]){
+  spcFiles <- list.files(path = file.path(dirsGit$Analysis,"Results","Bulletin 17C","Station"), 
+                         pattern = '*.spc')
+  invisible(lapply(1:length(spcFiles), function(i) system("PeakfqSA_win.exe",spcFiles[i],intern = TRUE, 
+                                                          ignore.stdout = FALSE,
+                                                          ignore.stderr = FALSE,wait=FALSE)))
+}
+if (SKEWTYPE_FLAGS["WEIGHTED"]){
+  spcFiles <- list.files(path = file.path(dirsGit$Analysis,"Results","Bulletin 17C","Weighted"), 
+                         pattern = '*.spc')
+  invisible(lapply(1:length(spcFiles), function(i) system("PeakfqSA_win.exe",spcFiles[i],intern = TRUE, 
+                                                          ignore.stdout = FALSE,
+                                                          ignore.stderr = FALSE,wait=FALSE)))
+}
+```
+
+
+## Load and process flow frequency analysis data
+User may comment out lines in the ls.Types assignments in order to only retrieve portions of all available analyses.
+```{r setup which particular analysis to run}
+# Set up lists
+ls.Types       <- list()
+ls.folders.out <- list()
+ls.extensions  <- list()
+ls.colNames    <- list()
+
+if (DATA_FLAGS["USGS"]){
+  ls.Types[["USGS"]] <- c("PKFQ72_17C_P_USGS",
+                          "PKFQSA_17C",
+                          "HEC_17B_P_USGS",
+                          "HEC_17B_D_USGS",
+                          "PKFQ42_17B_P_USGS",
+                          "PKFQ42_17B_D_USGS",
+                          "PARTDUR_USGS")[ANALYSIS_FLAGS]
+  ls.folders.out[["USGS"]] <- c("PKFQ72_17C_P_USGS" = "/Users/MM/Downloads",
+                               "PKFQSA_17C" =        file.path(dirsGit$dir, "Analysis","Results","Bulletin 17C","Generalized"),
+                               "HEC_17B_P_USGS"    = file.path(dirsGit$DataOrig,"HEC","20160107_Combined_HEC_USGS_Pk"), 
+                               "HEC_17B_D_USGS"    = file.path(dirsGit$DataOrig,"HEC","20151208_USGSmaxAnnualDailyMean_HEC","Table"),
+                               "PKFQ42_17B_P_USGS"      = file.path(dirsGit$DataOrig,"PeakFQ","WithMySkews","USGSp"),
+                               "PKFQ42_17B_D_USGS"      = file.path(dirsGit$DataOrig,"PeakFQ","WithMySkews","USGSd"),
+                               "PARTDUR_USGS" = file.path(dirsGit$OrigDataDir,"StreamGages","PartialDuration"))
+  ls.extensions[["USGS"]] <- c("PKFQ72_17C_P_USGS" = ".PRT\\>",
+                               "PKFQSA_17C"  = ".out\\>",
+                               "HEC_17B_P_USGS"    = ".tb\\>", 
+                               "HEC_17B_D_USGS"    = ".tb\\>",
+                               "PKFQ42_17B_P_USGS" = ".PRT\\>",
+                               "PKFQ42_17B_D_USGS" = ".PRT\\>",
+                               "PARTDUR_USGS"           = "pg_[[:digit:]]{8}_all.txt")
+}
+if(DATA_FLAGS["VICG"]){
+  ls.Types[["VICG"]] <- c(#"HEC_17B_D_VICG",
+    #"PKFQ42_17B_D_VICG",
+    "PKFQ42_17B_D_VICRG")
+  ls.folders.out[["VICG"]] <- c("HEC_17B_D_VIC"      = file.path(dirsGit$OrigDataDir,"HEC","20151001-VIC-gauge-Bulletin17Bresults","Tables"),
+                                "PKFQ42_17B_D_VICG"  = file.path(dirsGit$OrigDataDir,"PeakFQ","WithMySkews","VICg"),
+                                "PKFQ42_17B_D_VICRG" = file.path(dirsGit$DataOrig,"PeakFQ","WithMySkews","VICRg") )
+  ls.extensions[["VICG"]] <- c("HEC_17B_D_VIC"      = ".tb\\>", 
+                               "PKFQ42_17B_D_VICG"  = ".tb\\>",
+                               "PKFQ42_17B_D_VICRG" = ".PRT\\>")
+}
+```
+
+
+Load the data and process it to a reasonable and uniform format using subfunction LoadFFA.
+```{r load and process selected flow frequency analysis data}
+  if(!("LoadFFA" %in% ls())) source(file.path(dirsGit$Scripts,"Load Input","LoadFFA.R"))
+invisible(
+  for(T in TYPES){
+    SAVE <- SAVE_FLAGS[T]
+    Types <- ls.Types[[T]]
+    for(type in Types){
+      folder.out <- ls.folders.out[[T]][type]
+      filenames  <- list.files(path = folder.out, pattern = ls.extensions[[T]][type])
+      FISTAID      <- sapply(filenames, function(f) substr(f,regexec("[[:digit:]]{8}",f)[[1]][1],regexec("[[:digit:]]{8}",f)[[1]][1]+7))
+      FISTAIDTYPE <- sub(".*-(.*)\\.out$", "\\1", filenames)
+    }
+      PFA        <- lapply(1:length(filenames), function(i) LoadFFA(filenames[i], folder.out, TYPE = type, colStandard = TRUE))
+      names(PFA) <- FISTAID
+      lsname     <- paste0("ls.PFA.",type,".",T)
+      assign(lsname,PFA)
+      rm(PFA)
+      if(SAVE){
+        savefile <- paste0(gsub("-","",Sys.Date()),"_",lsname,DATATYPE,".RData")
+        save(ls.PFA.PKFQSA_17C.USGS, file=file.path(dirsGit$Data,savefile))
+z      }
+  }
+)
+  
+```
+
+## Estimate values and return periods of collapse and maximum flow events
+This section uses data on the date or year of bridge collapses as well as the data from a linked gauge to estimate the return period of the collapse event, as well as other events of interest. Which data is used in the analysis is determined in the first code block.
+
+First, estimate flows of events of interests using subfunction IdentifyFlowEvents.
+```{r identify flows of collapse and maximum events}
+if(!("df.Fail.NBI.Gage" %in% ls())) load(file.path(dirsGit$Data,"df.Fail.NBI.Gage.Active.RData"))
+Q_types <- c("FAIL", "MAX","MAXPREFAIL", "FAILPM","FAILYRMAX")
+Types <- unlist(ls.Types)
+if(any(grepl("USGS",Types))){
+  # ???
+}
+for (type in TYPES){
+  cols <- paste("Q",Q_types,"D",type)
+  
+  if(type == "USGS"){
+    # also do I/P analysis
+  }
+  
+}
+
+```
+
+Now estimate the return periods of those events using subfunctions EstimatePFAReturnPeriods and EstimatePartialDurationReturnPeriods.
+```{r estimate return periods of collapse and maximum events}
+
+
+Types   <- unlist(ls.Types)
+Q_types <- c("FAIL", "MAX","MAXPREFAIL", "FAILPM","FAILYRMAX")
+if(any(grepl("USGS",Types))){
+  
+}
+for (types in DATATYPES){
+  PFA       <- lapply(row.names(df.study),function(i) 
+    EstimatePFAReturnPeriod(Q = c(FAIL = ls.FlowEvents[[types]][i,"Q_FAIL_USGS"],
+                                  FAILPM = ls.FlowEvents[[types]][i,"Q_FAILPM1_USGS"], 
+                                  FAILYRMAX = ls.FlowEvents[[types]][i,"Q_FAILYRMAX_USGS"], 
+                                  MAX = ls.FlowEvents[[types]][i,"Q_MAX_USGS"],
+                                  MAXPREFAIL = ls.FlowEvents[[types]][i,"Q_MAXPREFAIL_USGS"]),
+                                  STAID = df.study[i,"STAID"], 
+                                  df.PFA = ls.PFA.PKFQSA_17C.USGS[df.study[i,"STAID"]],
+                                  colSuff = "USGS"))
+  
+}
+names(PFA) <- df.study$ID
+PFA <- ldply(PFA, data.frame)
+colnames(PFA)[which(names(PFA) == ".id")] <- "ID"
+row.names(PFA) <- df.study$ID
+ls.PFAReturnPeriods[[types]] <- PFA
+dfname     <- paste0("df.PFAReturnPeriods.",types,".",T)
+      assign(dfname,PFA)
+      if(SAVE){
+        savefile <- paste0(gsub("-","",Sys.Date()),"_",dfname,DATATYPE,".RData")
+        save(df.PFAReturnPeriods.PKFQSA_17C.USGSPEAK, file=file.path(dirsGit$Data,savefile))
+        rm(savefile)
+
+      }
+df.study$Q_FAIL_D_USGS <- df.FlowEvents.USGS.D$Q_FAIL_D_USGS
+df.study$Q_FAIL_P_USGS <- df.FlowEvents.USGS.P$Q_FAIL_P_USGS
+
+```
+
+```{r Run a Partial Duration Analysis and Return Periods}
+if (ANALYSIS_FLAGS["PARTDUR_USGS"]){
+  df.PartDur <- lapply(row.names(df.study),function(i)
+  PartialDurationAnalysis(df.PartDur = ls.Discharge$PartDurData[[df.study[i,"STAID"]]],
+                          df.flow = ls.Discharge$DailyMean[[df.study[i,"STAID"]]],
+                          QfailD = df.study[i,"Q_FAIL_D_USGS"],
+                          QfailP = df.study[i,"Q_FAIL_P_USGS"],
+                          colSuff = "USGS"))
+  names(df.PartDur) <- df.study$ID
+  df.PartDur <- ldply(df.PartDur, data.frame)
+  colnames(df.PartDur)[which(names(df.PartDur) == ".id")] <- "ID"
+}
+```
+

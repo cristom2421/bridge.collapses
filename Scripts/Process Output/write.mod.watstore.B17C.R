@@ -2,20 +2,19 @@ write.mod.watstore <- function(dates, # dates or years of flow data
                            Q, # regular peaks
                            QINT = NA, # any interval as dataframe 
                            STAID, # to lookup correct header info
-                           GENSKEW, #SKEW STATION
-                           SKEWSD, #SKEW STANDARD DEVIATION 
-                           GAGEBASE, #GAGE BASE
-                           PPALPHA, 
-                           LOTHRESH, #LOW OUTLIERS TRESHHOLD
-                           STANAME_APPEND = "", # append to stationname, e.g., "VIC data"
+                           SKEW, #REGIONAL SKEW 
+                           SKEWSD = 0.55, #SKEW STANDARD ERROR 
+                           SKEWTYPE,
+                           STANAME_APPEND = "",
+                           DATATYPE,# append to stationname, e.g., "VIC data"
                            file.out="",
-                           folder.out=getwd()){
+                           folder.out){
   
-  #LAST UPDATED ON 10-23-2018
+  #LAST UPDATED ON 09-04-2019 by Cristopher Montalvo
   
   #SCRIPT THAT TAKES IN THE FLOOD DATA FROM STREAM GAUGES, FORMATS AND OUTPUTS A .SPC FILE FOR THE USE WITH PEAKFQSA TO PERFORM A BULLETIN 17C ANALYSIS.
   
-  # REQUIRED INPUT 
+  # REQUIRED ARGUMENTS
   # dates (Dates of Peaks) is a [nDate x 1] of class Date or character (e.g. dates<-seq(as.Date("1910/1/1"), as.Date("1999/1/1"), "years"))
   # Q (FLow) must be as a [nDate x 1] of class numeric or integer vector (e.g. flow<-(4000:4500))
   # QINT (FLow Interval), if present, must be a data.frame of [nInt x 3], with columns [year min-thresh max-thresh]
@@ -27,7 +26,7 @@ write.mod.watstore <- function(dates, # dates or years of flow data
   #LOTHRESH (Low outlier tHreshold) is [1x1] of numeric or integer class
   
   
-  # OPTIONAL INPUT
+  # OPTIONAL ARGUMENTS
   # STANAME_APPEND is a character [1x1] with additional text to append to the STAID in naming the output file
   #       e.g., "VICG_RAPID" or "FROM_DAILY_MEANS""-
   # file.out is a character [1x1] that can be used to produce a standard end of the output file name, e.g. "peaks.psf"
@@ -66,27 +65,28 @@ write.mod.watstore <- function(dates, # dates or years of flow data
   #STATION NAME
   STATIONNAME<-substr(PKF.header[3],16,nchar(PKF.header[3]))
   STATIONID <- str_pad(as.character(STATIONNAME), width = 37, side = "left", pad = " ")
-  out[1] <- paste0("STATION",STATIONID,STANAME_APPEND,collapse = "")
+  out[1] <- paste0("REGIONAL",STATIONID,STANAME_APPEND,collapse = "")
   
-  #FILENAME NECESSARY FOR PEAKFQSA TO READ AND PROCESS OUTPUT FILE
+  #FILENAME ON TEXTFILE MUST BE THE SAME AS OUTPUT FILE NAME
   FILENAME <- str_pad(as.character(STAID,STANAME_APPEND), width = 15, side = "left", pad = " ")
-  out[2] <-paste0("I",FILENAME,"peaks.spc",collapse="")
+  out[2] <-paste0("I",FILENAME,"-",DATATYPE,".spc",collapse="")
   
   #STATION ID
-  STATIONID <- str_pad(as.character("STATION"), width = 13, side = "left", pad = " ")
+  STATIONID <- str_pad(as.character(SKEWTYPE), width = 17, side = "left", pad = " ")
   out[3] <- paste0("SKEWOPT",STATIONID,STANAME_APPEND,collapse = "")
   
-  #GENERAL SKEW
-  GENSKEW <-sprintf("%.3f", round(GENSKEW,4))
-  GENSKEW <- str_pad(as.character(GENSKEW), width = 11, side = "left", pad = " ")
-  out[4] <- paste0("GENSKEW",GENSKEW,collapse = "")
+  #SKEW
+  SKEW <-sprintf("%.3f", round(SKEW,4))
+  SKEW <- str_pad(as.character(SKEW), width = 11, side = "left", pad = " ")
+  out[4] <- paste0("GENSKEW",SKEW,collapse = "")
   
-  #SKEW STANDARD DEVIATION
+  #SKEW STANDARD ERROR
   SKEWSD <-sprintf("%.3f", round(SKEWSD,4))
   SKEWSD <- str_pad(as.character(SKEWSD), width = 12, side = "left", pad = " ")
   out[5] <- paste0("SKEWSD",SKEWSD,collapse = "")
   
-  #GAGEBASE
+  #GAGEBASE 
+  GAGEBASE <- 0
   GAGEBASE <-sprintf("%.3f", round(GAGEBASE,4))
   GAGEBASE <- str_pad(as.character(GAGEBASE), width = 10, side = "left", pad = " ")
   out[6] <- paste0("GAGEBASE",GAGEBASE,collapse = "")
@@ -96,6 +96,7 @@ write.mod.watstore <- function(dates, # dates or years of flow data
   out[7] <- paste0("A_S_SKEW_OPT",SKEWOPT,collapse = "")
   
   #PP ALPHA
+  PPALPHA <- 0
   PPALPHA <-sprintf("%.3f", round(PPALPHA,4))
   PPALPHA <- str_pad(as.character(PPALPHA), width = 10, side = "left", pad = " ")
   out[8] <- paste0("PP_ALPHA",PPALPHA,collapse = "")
@@ -105,6 +106,7 @@ write.mod.watstore <- function(dates, # dates or years of flow data
   out[9] <- paste0("LOMETHOD",SKEWOPT,collapse = "")
   
   #LOW OUTLIER TRESHOLD 
+  LOTHRESH <- 0
   LOTHRESH <-sprintf("%.3f", round(LOTHRESH,4))
   LOTHRESH <- str_pad(as.character(LOTHRESH), width = 10, side = "left", pad = " ")
   out[10] <- paste0("LOTHRESH",LOTHRESH,collapse = "")
@@ -124,9 +126,11 @@ write.mod.watstore <- function(dates, # dates or years of flow data
   out[13] <- paste0("ENDYEAR",ENDYEAR,collapse = "")
   
   #THRESHOLD 
-  #IT HAS BEEN CODED TO USE THE MIN YEAR AND THE MAX YEAR AS BOUNDARIES, FLOW OF "0" HAS BEEN HARDCODED IN LINE 124
-  sf<-as.character("1.00E+010")
-  zero<-sprintf("%.0f", round(0,1))
+  #IT HAS BEEN CODED TO USE THE MIN YEAR AND THE MAX YEAR AS BOUNDARIES AND 1000 X MAXFLOW
+  sf <- max(Q)
+  sf <- 1000*sf
+  sf <- formatC(sf, format = "E", digits = 2)
+  zero<-sprintf("%.0f", round(THRESHOLD,1))
   miny <- str_pad(as.character(min(year)), width = 6, side = "left", pad = " ")
   maxy <- str_pad(as.character(max(year)), width = 7, side = "left", pad = " ")
   zero <- str_pad(as.character(zero), width = 5, side = "left", pad = " ")
@@ -152,7 +156,7 @@ write.mod.watstore <- function(dates, # dates or years of flow data
 
 
   # write
-  if (nchar(file.out)==0) file.out <- paste0(STAID,STANAME_APPEND,"peaks")
+  if (nchar(file.out)==0) file.out <- paste0(STAID,"-",DATATYPE,STANAME_APPEND)
   if (!grepl(".spc\\>",file.out)) file.out <- paste0(file.out[1],".spc")
 
    write.table(out, file = file.path(folder.out,file.out) , quote = FALSE, sep = "", col.names = FALSE, row.names = FALSE, eol = "\r") # eol gives the ^M$ return used in the USGS watstore files
